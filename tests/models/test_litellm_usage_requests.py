@@ -1,6 +1,6 @@
 import litellm
 import pytest
-from litellm.types.utils import Choices, Message, ModelResponse
+from litellm.types.utils import Choices, Message, ModelResponse, Usage
 
 from agents.extensions.models.litellm_model import LitellmModel
 from agents.model_settings import ModelSettings
@@ -24,6 +24,20 @@ async def _get_response(monkeypatch, *, response: ModelResponse):
     )
 
 
+def _response_with_null_counts() -> ModelResponse:
+    response = ModelResponse(
+        choices=[Choices(index=0, message=Message(role="assistant", content="ok"))]
+    )
+    # Provider SDK parsing can construct typed usage without validating null counts,
+    # so a present usage object can still carry None where an int is declared.
+    response.usage = Usage.model_construct(  # type: ignore[attr-defined]
+        prompt_tokens=None,
+        completion_tokens=5,
+        total_tokens=None,
+    )
+    return response
+
+
 def _response_without_usage() -> ModelResponse:
     response = ModelResponse(
         choices=[Choices(index=0, message=Message(role="assistant", content="ok"))]
@@ -42,4 +56,16 @@ async def test_request_is_counted_when_litellm_reports_no_usage(monkeypatch) -> 
     assert resp.usage.requests == 1
     assert resp.usage.input_tokens == 0
     assert resp.usage.output_tokens == 0
+    assert resp.usage.total_tokens == 0
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_null_token_counts_are_normalized(monkeypatch) -> None:
+    """A present usage object may still carry null counts; they read as zero, not a crash."""
+    resp = await _get_response(monkeypatch, response=_response_with_null_counts())
+
+    assert resp.usage.requests == 1
+    assert resp.usage.input_tokens == 0
+    assert resp.usage.output_tokens == 5
     assert resp.usage.total_tokens == 0

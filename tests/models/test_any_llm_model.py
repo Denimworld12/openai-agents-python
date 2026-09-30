@@ -2482,3 +2482,61 @@ async def test_any_llm_responses_stream_with_usage_is_not_marked(monkeypatch) ->
     assert isinstance(terminal, ResponseCompletedEvent)
     assert terminal.response.usage is not None
     assert _requests_for_response_without_usage(terminal.response) == 0
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("counts", "expected"),
+    [
+        ((None, 13, 24), (0, 13, 24)),
+        ((11, None, 24), (11, 0, 24)),
+        ((11, 13, None), (11, 13, 0)),
+        ((None, None, None), (0, 0, 0)),
+        ((11, 13, 24), (11, 13, 24)),
+    ],
+    ids=["null-input", "null-output", "null-total", "all-null", "valid"],
+)
+async def test_any_llm_responses_path_normalizes_nullable_usage(
+    monkeypatch: pytest.MonkeyPatch,
+    counts: tuple[int | None, int | None, int | None],
+    expected: tuple[int, int, int],
+) -> None:
+    """The responses branch takes null counts the same way the chat branch does.
+
+    #5238 normalized the chat-shaped counts; an adapter reaching the responses branch can
+    report the same nulls, and the run should not fail after the provider already answered.
+    """
+    response = _response("Hello")
+    # Provider SDK parsing can construct typed responses without validating null counts.
+    response.usage = ResponseUsage.model_construct(
+        input_tokens=counts[0],
+        output_tokens=counts[1],
+        total_tokens=counts[2],
+        input_tokens_details=InputTokensDetails.model_validate(
+            {"cache_write_tokens": 0, "cached_tokens": 0}
+        ),
+        output_tokens_details=OutputTokensDetails(reasoning_tokens=0),
+    )
+    provider = FakeAnyLLMProvider(supports_responses=True, responses_response=response)
+    module, _ = _import_any_llm_module(monkeypatch, provider)
+
+    model = module.AnyLLMModel(model="gpt-5.4-mini", api_key="openai-key")
+    result = await model.get_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        prompt=None,
+    )
+
+    assert result.usage.requests == 1
+    assert (
+        result.usage.input_tokens,
+        result.usage.output_tokens,
+        result.usage.total_tokens,
+    ) == expected

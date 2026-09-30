@@ -8,7 +8,11 @@ from openai.types.completion_usage import (
     CompletionUsage,
     PromptTokensDetails,
 )
-from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
+from openai.types.responses.response_usage import (
+    InputTokensDetails,
+    OutputTokensDetails,
+    ResponseUsage,
+)
 
 from agents import Agent, Runner
 from agents.run_internal.agent_runner_helpers import snapshot_usage, usage_delta
@@ -17,6 +21,7 @@ from agents.usage import (
     RequestUsage,
     Usage,
     _raw_usage_snapshot,
+    _response_usage_to_usage,
     deserialize_usage,
     model_usage_to_span_usage,
     serialize_usage,
@@ -666,3 +671,39 @@ def test_usage_snapshot_delta_and_span_preserve_cache_write_tokens() -> None:
         "cached_tokens": 5,
         "cache_write_tokens": 7,
     }
+
+
+@pytest.mark.parametrize(
+    ("counts", "expected"),
+    [
+        ((None, 5, 12), (0, 5, 12)),
+        ((7, None, 12), (7, 0, 12)),
+        ((7, 5, None), (7, 5, 0)),
+        ((None, None, None), (0, 0, 0)),
+        ((7, 5, 12), (7, 5, 12)),
+    ],
+    ids=["null-input", "null-output", "null-total", "all-null", "valid"],
+)
+def test_response_usage_conversion_normalizes_null_counts(
+    counts: tuple[int | None, int | None, int | None],
+    expected: tuple[int, int, int],
+) -> None:
+    """Responses-shaped usage can arrive with null counts, the same way #5238 found for chat.
+
+    An adapter that builds typed usage without validating it puts None where an int is
+    declared, so the conversion has to read those as zero instead of failing the run that
+    already produced an answer.
+    """
+    response_usage = ResponseUsage.model_construct(
+        input_tokens=counts[0],
+        output_tokens=counts[1],
+        total_tokens=counts[2],
+        input_tokens_details=InputTokensDetails(cached_tokens=3, cache_write_tokens=0),
+        output_tokens_details=OutputTokensDetails(reasoning_tokens=2),
+    )
+
+    usage = _response_usage_to_usage(response_usage)
+
+    assert (usage.input_tokens, usage.output_tokens, usage.total_tokens) == expected
+    assert usage.input_tokens_details.cached_tokens == 3
+    assert usage.output_tokens_details.reasoning_tokens == 2
